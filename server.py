@@ -12,7 +12,7 @@ AUTH_PASS=os.getenv('TRACKER_PASSWORD','')
 DATA_DIR=os.getenv('DATA_DIR','/data' if os.path.isdir('/data') else os.path.join(os.path.dirname(__file__),'data'))
 os.makedirs(DATA_DIR, exist_ok=True); DB=os.path.join(DATA_DIR,'bitcoin_hero.sqlite3')
 SYMS=['BTC','ETH','SOL','DOGE','XRP','ADA','LINK','AVAX']
-BASE={'BTC':(67620.74,97217.60),'ETH':(3867.34,5469.73),'SOL':(654.08,907.18),'DOGE':(.0437,.181773),'XRP':(.483,.9173),'ADA':(.402123,.6635),'LINK':(2.02,4.15),'AVAX':(62.25,135.04356736627548)}
+BASE={'BTC': (67620.74, 99317.78113660314), 'ETH': (3865.1230148730606, 5640.140525), 'SOL': (654.08, 1299.1197951005986), 'DOGE': (0.0437, 0.33050908755131014), 'XRP': (0.3259173860203029, 0.9173), 'ADA': (0.40205, 0.6635), 'LINK': (1.85625, 4.15), 'AVAX': (62.25, 147.83748089962543)}
 lock=threading.RLock(); runtime={'ok':False,'last_error':None,'last_poll':None,'tick_ms':3000}
 
 def con():
