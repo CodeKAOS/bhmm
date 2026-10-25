@@ -1,4 +1,4 @@
-BITCOIN HERO TRACKER v14 — NORTHFLANK EDITION
+BITCOIN HERO TRACKER v15 — NORTHFLANK EDITION
 ==============================================
 
 Features retained / included
@@ -14,7 +14,7 @@ Features retained / included
 - CSV Import & Merge: adds old tracker exports without replacing existing data
 - Duplicate price/event detection during import
 - Automatic SQLite backup before each import
-- Updated protected extrema using cloud snapshot dated 2026-10-23 (latest cloud snapshot through 22:41:16 UTC)
+- Updated protected extrema using cloud snapshot dated 2026-10-25 (latest cloud snapshot through 03:20:03 UTC)
 
 NORTHFLANK DEPLOYMENT
 1. Extract this ZIP and upload the CONTENTS to the root of a private GitHub repository.
