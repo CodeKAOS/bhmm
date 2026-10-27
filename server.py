@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import base64, csv, hmac, io, json, os, shutil, sqlite3, threading, time
+import base64, csv, hmac, io, json, os, shutil, sqlite3, threading, time, secrets, hashlib
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -14,6 +14,7 @@ os.makedirs(DATA_DIR, exist_ok=True); DB=os.path.join(DATA_DIR,'bitcoin_hero.sql
 SYMS=['BTC','ETH','SOL','DOGE','XRP','ADA','LINK','AVAX']
 BASE={'BTC': (67620.74, 102652.3283235368), 'ETH': (3360.5842984163146, 5640.140525), 'SOL': (654.08, 1299.19615215442), 'DOGE': (0.0437, 0.3305090875513101), 'XRP': (0.3017977083568663, 0.9173), 'ADA': (0.3401675692355668, 0.6635), 'LINK': (1.85625, 4.15), 'AVAX': (62.25, 167.0230490349094)}
 lock=threading.RLock(); runtime={'ok':False,'last_error':None,'last_poll':None,'tick_ms':3000}
+SESSIONS={}; SESSION_LOCK=threading.RLock(); SESSION_TTL=12*3600
 
 def con():
     c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row
@@ -215,60 +216,76 @@ def csv_bytes():
     return b.getvalue().encode()
 
 class Handler(SimpleHTTPRequestHandler):
+    def session_token(self):
+        cookie=self.headers.get('Cookie','')
+        for item in cookie.split(';'):
+            k,sep,v=item.strip().partition('=')
+            if sep and k=='bh_session': return v
+        return ''
     def authorized(self):
-        # Fail closed in cloud deployments: set TRACKER_PASSWORD to enable access.
-        if not AUTH_PASS:
-            return False
-        header=self.headers.get('Authorization','')
-        if not header.startswith('Basic '):
-            return False
-        try:
-            raw=base64.b64decode(header[6:], validate=True).decode('utf-8')
-            user,password=raw.split(':',1)
-        except Exception:
-            return False
-        return hmac.compare_digest(user,AUTH_USER) and hmac.compare_digest(password,AUTH_PASS)
-    def require_auth(self):
-        if self.authorized():
+        token=self.session_token()
+        if not token: return False
+        now=time.time()
+        with SESSION_LOCK:
+            expiry=SESSIONS.get(token)
+            if expiry is None: return False
+            if expiry<now:
+                SESSIONS.pop(token,None); return False
+            SESSIONS[token]=now+SESSION_TTL
             return True
-        body=b'Authentication required'
-        self.send_response(401)
-        self.send_header('WWW-Authenticate','Basic realm="Bitcoin Hero Tracker", charset="UTF-8"')
-        self.send_header('Cache-Control','no-store')
-        self.send_header('Content-Type','text/plain; charset=utf-8')
-        self.send_header('Content-Length',str(len(body)))
-        self.end_headers(); self.wfile.write(body)
+    def require_auth(self):
+        if self.authorized(): return True
+        self.send_json({'error':'Please sign in to continue'},401)
         return False
     def log_message(self,fmt,*args): print('%s - %s'%(self.address_string(),fmt%args))
-    def send_json(self,obj,code=200):
-        body=json.dumps(obj,separators=(',',':')).encode(); self.send_response(code); self.send_header('Content-Type','application/json'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+    def send_json(self,obj,code=200,headers=None):
+        body=json.dumps(obj,separators=(',',':')).encode(); self.send_response(code); self.send_header('Content-Type','application/json; charset=utf-8'); self.send_header('Cache-Control','no-store'); self.send_header('Content-Length',str(len(body)))
+        for k,v in (headers or {}).items(): self.send_header(k,v)
+        self.end_headers(); self.wfile.write(body)
     def do_POST(self):
-        if not self.require_auth(): return
         u=urlparse(self.path)
+        if u.path=='/api/login':
+            try:
+                n=int(self.headers.get('Content-Length','0'))
+                if n<=0 or n>10000: return self.send_json({'error':'Enter your username and password'},400)
+                data=json.loads(self.rfile.read(n).decode('utf-8')); user=str(data.get('username','')); password=str(data.get('password',''))
+                if not AUTH_PASS or not hmac.compare_digest(user,AUTH_USER) or not hmac.compare_digest(password,AUTH_PASS):
+                    return self.send_json({'error':'Incorrect username or password'},401)
+                token=secrets.token_urlsafe(32)
+                with SESSION_LOCK: SESSIONS[token]=time.time()+SESSION_TTL
+                secure='; Secure' if self.headers.get('X-Forwarded-Proto','').lower()=='https' else ''
+                return self.send_json({'ok':True},200,{'Set-Cookie':f'bh_session={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_TTL}'+secure})
+            except Exception:
+                return self.send_json({'error':'Unable to sign in. Please try again.'},400)
+        if u.path=='/api/logout':
+            token=self.session_token()
+            with SESSION_LOCK: SESSIONS.pop(token,None)
+            return self.send_json({'ok':True},200,{'Set-Cookie':'bh_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0'})
+        if not self.require_auth(): return
         if u.path!='/api/import': return self.send_json({'error':'not found'},404)
         try:
             n=int(self.headers.get('Content-Length','0'))
             if n<=0 or n>25_000_000: return self.send_json({'error':'CSV must be between 1 byte and 25 MB'},400)
             result=import_csv_bytes(self.rfile.read(n))
             return self.send_json(result)
-        except Exception as e:
-            return self.send_json({'error':str(e)},400)
-
+        except Exception as e: return self.send_json({'error':str(e)},400)
     def do_GET(self):
-        if not self.require_auth(): return
         u=urlparse(self.path)
+        # Serve only the login-capable dashboard shell before authentication; APIs remain protected.
+        if u.path in ('/','/tracker.html'):
+            self.path='/tracker.html'; return super().do_GET()
+        if not self.require_auth(): return
         if u.path=='/api/state': return self.send_json(latest_state())
         if u.path=='/api/history':
             q=parse_qs(u.query); s=(q.get('symbol') or [''])[0].upper(); rng=(q.get('range') or ['live'])[0]
             if s not in SYMS or rng not in ('live','1h','4h','1d','all'): return self.send_json({'error':'bad parameters'},400)
             return self.send_json({'symbol':s,'range':rng,**history(s,rng)})
         if u.path=='/api/export.csv':
-            body=csv_bytes(); self.send_response(200); self.send_header('Content-Type','text/csv'); self.send_header('Content-Disposition','attachment; filename="bitcoin-hero-cloud-snapshot.csv"'); self.send_header('Content-Length',str(len(body))); self.end_headers(); return self.wfile.write(body)
+            body=csv_bytes(); self.send_response(200); self.send_header('Content-Type','text/csv'); self.send_header('Content-Disposition','attachment; filename="bitcoin-hero-cloud-snapshot.csv"'); self.send_header('Content-Length',str(len(body))); self.send_header('Cache-Control','no-store'); self.end_headers(); return self.wfile.write(body)
         if u.path=='/api/health': return self.send_json({'ok':runtime['ok'],'lastPoll':runtime['last_poll'],'error':runtime['last_error']})
-        if u.path=='/': self.path='/tracker.html'
-        return super().do_GET()
+        return self.send_json({'error':'not found'},404)
 
 if __name__=='__main__':
     os.chdir(os.path.dirname(os.path.abspath(__file__))); init_db(); bootstrap_candles(); threading.Thread(target=collector,daemon=True).start()
-    print(f'Bitcoin Hero Northflank Tracker v18 on 0.0.0.0:{PORT}; DB={DB}')
+    print(f'Bitcoin Hero Northflank Tracker v19 on 0.0.0.0:{PORT}; DB={DB}')
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
