@@ -1,4 +1,4 @@
-BITCOIN HERO TRACKER v15 — NORTHFLANK EDITION
+BITCOIN HERO TRACKER v17 — NORTHFLANK EDITION
 ==============================================
 
 Features retained / included
@@ -14,7 +14,7 @@ Features retained / included
 - CSV Import & Merge: adds old tracker exports without replacing existing data
 - Duplicate price/event detection during import
 - Automatic SQLite backup before each import
-- Updated protected extrema using cloud snapshot dated 2026-10-25 (latest cloud snapshot through 03:20:03 UTC)
+- Updated protected extrema using cloud snapshot dated 2026-10-27 (latest snapshot at 2026-10-27T17:29:34.192000+00:00 UTC)
 
 NORTHFLANK DEPLOYMENT
 1. Extract this ZIP and upload the CONTENTS to the root of a private GitHub repository.
@@ -40,6 +40,9 @@ IMPORTING OLD DATA
 - Duplicate timestamp/price records are skipped.
 - You can import multiple snapshots one after another.
 - Backups are stored on the /data persistent volume as backup-YYYYMMDD-HHMMSS.sqlite3.
+
+EXISTING DEPLOYMENTS
+- The BASE extrema are used only when each symbol is first initialized. If /data already contains the SQLite database, code redeployment will not overwrite extrema already stored in that database. Use the dashboard's CSV import/merge workflow for historical data; do not delete the persistent volume unless you intentionally want to erase stored history.
 
 IMPORTANT
 - Bitcoin Hero prices are simulated, not real cryptocurrency market prices.
