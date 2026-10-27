@@ -1,20 +1,24 @@
-BITCOIN HERO TRACKER v17 — NORTHFLANK EDITION
+BITCOIN HERO TRACKER v18 — NORTHFLANK EDITION
 ==============================================
 
 Features retained / included
 - 24/7 server-side Bitcoin Hero simulated-price collector (~3 seconds)
-- Persistent SQLite history
+- Persistent SQLite history and hourly OHLC candles
 - Password protection for dashboard + APIs
-- LIVE (5 min), 1H, 1D and ALL charts for all 8 coins
-- Hover/touch chart inspection showing price + timestamp
-- Observed highs/lows and timestamps
+- Candlestick charts with Open, High, Low, Close (OHLC) hover details
+- LIVE (last 5 minutes), 1H (1-minute candles), 4H (5-minute candles), 1D (15-minute candles), ALL (saved hourly candles)
+- Live 1-minute and current hourly candles update from normal 3-second price polls
+- Hourly candles are stored in SQLite and survive restarts/redeployments when the existing /data volume is retained
+- On first startup, existing raw price history is converted into hourly candles without deleting existing price records
+- Recent minute candles are restored from existing raw observations at startup
+- Observed highs/lows and timestamps remain independently protected and update on each poll
 - Potential UP/DOWN percentage range calculations
 - Colorful gain-potential rings
 - CSV export
 - CSV Import & Merge: adds old tracker exports without replacing existing data
 - Duplicate price/event detection during import
 - Automatic SQLite backup before each import
-- Updated protected extrema using cloud snapshot dated 2026-10-27 (latest snapshot at 2026-10-27T17:29:34.192000+00:00 UTC)
+- Existing persistent database and observed extrema are preserved on upgrade
 
 NORTHFLANK DEPLOYMENT
 1. Extract this ZIP and upload the CONTENTS to the root of a private GitHub repository.
@@ -28,7 +32,7 @@ NORTHFLANK DEPLOYMENT
       PORT = 8000
    Do not put the password in GitHub.
 6. Networking: expose port 8000, protocol HTTP, accessibility Public.
-7. Add a persistent volume mounted at /data. Keep the service at ONE replica because SQLite uses this single-writer volume.
+7. Add/retain a persistent volume mounted at /data. Keep the service at ONE replica because SQLite uses this single-writer volume.
 8. Deploy. Northflank will provide an HTTPS *.code.run address for the public port.
 9. Open the address. Your browser will request the username/password.
 10. Open /api/health after login if you want to verify the collector status.
@@ -38,11 +42,14 @@ IMPORTING OLD DATA
 - Select any CSV exported by the tracker.
 - The server makes a database backup first, then merges price rows and extrema events.
 - Duplicate timestamp/price records are skipped.
-- You can import multiple snapshots one after another.
+- Imported history is also folded into hourly candles.
 - Backups are stored on the /data persistent volume as backup-YYYYMMDD-HHMMSS.sqlite3.
 
-EXISTING DEPLOYMENTS
-- The BASE extrema are used only when each symbol is first initialized. If /data already contains the SQLite database, code redeployment will not overwrite extrema already stored in that database. Use the dashboard's CSV import/merge workflow for historical data; do not delete the persistent volume unless you intentionally want to erase stored history.
+EXISTING DEPLOYMENTS — IMPORTANT
+- Keep the existing /data persistent volume mounted. Do not delete or replace it during deployment.
+- The first v18 startup adds candle tables and backfills hourly candles from existing raw prices. It does not delete existing raw prices, observed extrema, or events.
+- Existing extrema are not overwritten by BASE defaults when a database already exists.
+- The first candle backfill can take a little time if the database contains a long raw-price history.
 
 IMPORTANT
 - Bitcoin Hero prices are simulated, not real cryptocurrency market prices.

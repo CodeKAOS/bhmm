@@ -19,6 +19,59 @@ def con():
     c=sqlite3.connect(DB, timeout=20); c.row_factory=sqlite3.Row
     c.execute('PRAGMA journal_mode=WAL'); c.execute('PRAGMA synchronous=NORMAL'); return c
 
+def upsert_candle(c, symbol, interval_ms, ts, price):
+    bucket=(int(ts)//interval_ms)*interval_ms
+    c.execute('''INSERT INTO candles(symbol,interval_ms,bucket_ts,open,high,low,close,updated_ts)
+        VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(symbol,interval_ms,bucket_ts) DO UPDATE SET
+          high=MAX(candles.high,excluded.high), low=MIN(candles.low,excluded.low),
+          close=excluded.close, updated_ts=MAX(candles.updated_ts,excluded.updated_ts)''',(symbol,interval_ms,bucket,float(price),float(price),float(price),float(price),int(ts)))
+
+def rebuild_hourly_candles(symbols=None):
+    """Rebuild hourly OHLC from retained raw observations; used for migration and CSV merges."""
+    wanted=set(symbols or SYMS)
+    with lock, con() as c:
+        for sym in wanted:
+            c.execute('DELETE FROM candles WHERE symbol=? AND interval_ms=3600000',(sym,))
+            rows=c.execute('SELECT ts,price FROM prices WHERE symbol=? ORDER BY ts',(sym,)).fetchall()
+            current_bucket=None; values=None; updated=None
+            for row in rows:
+                ts=int(row['ts']); price=float(row['price']); bucket=(ts//3600000)*3600000
+                if bucket!=current_bucket:
+                    if values is not None:
+                        c.execute('INSERT OR REPLACE INTO candles(symbol,interval_ms,bucket_ts,open,high,low,close,updated_ts) VALUES(?,?,?,?,?,?,?,?)',(sym,3600000,current_bucket,values[0],values[1],values[2],values[3],updated))
+                    current_bucket=bucket; values=[price,price,price,price]; updated=ts
+                else:
+                    values[1]=max(values[1],price); values[2]=min(values[2],price); values[3]=price; updated=ts
+            if values is not None:
+                c.execute('INSERT OR REPLACE INTO candles(symbol,interval_ms,bucket_ts,open,high,low,close,updated_ts) VALUES(?,?,?,?,?,?,?,?)',(sym,3600000,current_bucket,values[0],values[1],values[2],values[3],updated))
+
+def bootstrap_candles():
+    with con() as c:
+        done=c.execute("SELECT value FROM app_meta WHERE key='hourly_candles_v1'").fetchone()
+    if not done:
+        rebuild_hourly_candles()
+        with con() as c: c.execute("INSERT OR REPLACE INTO app_meta(key,value) VALUES('hourly_candles_v1','1')")
+    # Recreate recent one-minute candles from existing observations so short views survive deployment too.
+    cutoff=int(time.time()*1000)-48*3600_000
+    with lock, con() as c:
+        c.execute('DELETE FROM candles WHERE interval_ms=60000 AND bucket_ts<?',(cutoff,))
+        rows=c.execute('SELECT ts,symbol,price FROM prices WHERE ts>=? ORDER BY ts,symbol',(cutoff,)).fetchall()
+        for row in rows:
+            upsert_candle(c,row['symbol'],60000,row['ts'],row['price'])
+
+def aggregate_candles(rows, interval_ms):
+    out=[]; bucket=None; cur=None
+    for row in rows:
+        ts=int(row['bucket_ts']); b=(ts//interval_ms)*interval_ms
+        if b!=bucket:
+            if cur is not None: out.append(cur)
+            bucket=b; cur={'ts':b,'open':float(row['open']),'high':float(row['high']),'low':float(row['low']),'close':float(row['close'])}
+        else:
+            cur['high']=max(cur['high'],float(row['high'])); cur['low']=min(cur['low'],float(row['low'])); cur['close']=float(row['close'])
+    if cur is not None: out.append(cur)
+    return out
+
 def init_db():
     with con() as c:
         c.executescript('''
@@ -27,6 +80,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS records(symbol TEXT PRIMARY KEY,low REAL,low_at INTEGER,high REAL,high_at INTEGER,samples INTEGER DEFAULT 0);
         CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,ts INTEGER,symbol TEXT,type TEXT,price REAL);
         CREATE INDEX IF NOT EXISTS idx_events_symbol_ts ON events(symbol,ts);
+        CREATE TABLE IF NOT EXISTS candles(symbol TEXT NOT NULL,interval_ms INTEGER NOT NULL,bucket_ts INTEGER NOT NULL,open REAL NOT NULL,high REAL NOT NULL,low REAL NOT NULL,close REAL NOT NULL,updated_ts INTEGER NOT NULL,PRIMARY KEY(symbol,interval_ms,bucket_ts));
+        CREATE INDEX IF NOT EXISTS idx_candles_symbol_interval_ts ON candles(symbol,interval_ms,bucket_ts);
+        CREATE TABLE IF NOT EXISTS app_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
         ''')
         now=int(time.time()*1000)
         for s,(lo,hi) in BASE.items():
@@ -40,7 +96,10 @@ def ingest(payload):
             try:p=float(p)
             except:continue
             ch=x.get('change'); ch=float(ch) if ch is not None else None
-            c.execute('INSERT OR IGNORE INTO prices(ts,symbol,price,change) VALUES(?,?,?,?)',(ts,s,p,ch))
+            inserted=c.execute('INSERT OR IGNORE INTO prices(ts,symbol,price,change) VALUES(?,?,?,?)',(ts,s,p,ch)).rowcount
+            if inserted:
+                upsert_candle(c,s,60000,ts,p)
+                upsert_candle(c,s,3600000,ts,p)
             r=c.execute('SELECT * FROM records WHERE symbol=?',(s,)).fetchone()
             if not r:
                 c.execute('INSERT INTO records(symbol,low,low_at,high,high_at,samples) VALUES(?,?,?,?,?,1)',(s,p,ts,p,ts)); continue
@@ -73,16 +132,24 @@ def latest_state():
     return out
 
 def history(symbol, rng):
-    now=int(time.time()*1000); cuts={'live':now-5*60_000,'1h':now-60*60_000,'1d':now-24*60*60_000}
-    cut=cuts.get(rng,0)
+    now=int(time.time()*1000)
+    cuts={'live':now-5*60_000,'1h':now-60*60_000,'4h':now-4*60*60_000,'1d':now-24*60*60_000,'all':0}
+    if rng=='all':
+        with con() as c:
+            rows=c.execute('SELECT bucket_ts,open,high,low,close FROM candles WHERE symbol=? AND interval_ms=3600000 ORDER BY bucket_ts',(symbol,)).fetchall()
+        # Keep permanent hourly storage, but cap the number of rendered candles for a responsive UI.
+        if len(rows)>2500:
+            rows=aggregate_candles(rows,((len(rows)+2499)//2500)*3600000)
+            return {'candles':rows,'points':[]}
+        return {'candles':[dict(ts=r['bucket_ts'],open=r['open'],high=r['high'],low=r['low'],close=r['close']) for r in rows], 'points':[]}
+    cut=cuts[rng]
     with con() as c:
-        rows=c.execute('SELECT ts,price FROM prices WHERE symbol=? AND ts>=? ORDER BY ts',(symbol,cut)).fetchall()
-    pts=[[r['ts'],r['price']] for r in rows]
-    # downsample only for rendering/network; database retains full 3-second observations
-    maxpts={'live':300,'1h':1200,'1d':1440,'all':2500}.get(rng,1200)
-    if len(pts)>maxpts:
-        step=len(pts)/maxpts; pts=[pts[int(i*step)] for i in range(maxpts-1)]+[pts[-1]]
-    return pts
+        rows=c.execute('SELECT bucket_ts,open,high,low,close FROM candles WHERE symbol=? AND interval_ms=60000 AND bucket_ts>=? ORDER BY bucket_ts',(symbol,cut)).fetchall()
+    rows=[dict(r) for r in rows]
+    interval={'live':60000,'1h':60000,'4h':300000,'1d':900000}[rng]
+    candles=aggregate_candles(rows,interval)
+    # The live/short views remain bounded. Long-term ALL history is one saved candle per hour.
+    return {'candles':candles,'points':[]}
 
 def import_csv_bytes(raw):
     text=raw.decode('utf-8-sig',errors='replace')
@@ -126,6 +193,15 @@ def import_csv_bytes(raw):
                 if typ in ('NEW HIGH','NEW LOW'):
                     ex=c.execute('SELECT 1 FROM events WHERE ts=? AND symbol=? AND type=? AND price=? LIMIT 1',(ts,sym,typ,price)).fetchone()
                     if not ex: c.execute('INSERT INTO events(ts,symbol,type,price) VALUES(?,?,?,?)',(ts,sym,typ,price)); events_added+=1
+    if touched:
+        rebuild_hourly_candles(touched)
+        # Refresh one-minute candles from imported plus live observations for touched coins.
+        cutoff=int(time.time()*1000)-48*3600_000
+        with lock, con() as c:
+            for sym in touched:
+                c.execute('DELETE FROM candles WHERE symbol=? AND interval_ms=60000 AND bucket_ts>=?',(sym,cutoff))
+                for row in c.execute('SELECT ts,price FROM prices WHERE symbol=? AND ts>=? ORDER BY ts',(sym,cutoff)).fetchall():
+                    upsert_candle(c,sym,60000,row['ts'],row['price'])
     return {'ok':True,'priceRecordsAdded':added,'eventsAdded':events_added,'duplicatesSkipped':dupes,'cryptosUpdated':len(touched),'backup':os.path.basename(backup)}
 
 def csv_bytes():
@@ -184,8 +260,8 @@ class Handler(SimpleHTTPRequestHandler):
         if u.path=='/api/state': return self.send_json(latest_state())
         if u.path=='/api/history':
             q=parse_qs(u.query); s=(q.get('symbol') or [''])[0].upper(); rng=(q.get('range') or ['live'])[0]
-            if s not in SYMS or rng not in ('live','1h','1d','all'): return self.send_json({'error':'bad parameters'},400)
-            return self.send_json({'symbol':s,'range':rng,'points':history(s,rng)})
+            if s not in SYMS or rng not in ('live','1h','4h','1d','all'): return self.send_json({'error':'bad parameters'},400)
+            return self.send_json({'symbol':s,'range':rng,**history(s,rng)})
         if u.path=='/api/export.csv':
             body=csv_bytes(); self.send_response(200); self.send_header('Content-Type','text/csv'); self.send_header('Content-Disposition','attachment; filename="bitcoin-hero-cloud-snapshot.csv"'); self.send_header('Content-Length',str(len(body))); self.end_headers(); return self.wfile.write(body)
         if u.path=='/api/health': return self.send_json({'ok':runtime['ok'],'lastPoll':runtime['last_poll'],'error':runtime['last_error']})
@@ -193,6 +269,6 @@ class Handler(SimpleHTTPRequestHandler):
         return super().do_GET()
 
 if __name__=='__main__':
-    os.chdir(os.path.dirname(os.path.abspath(__file__))); init_db(); threading.Thread(target=collector,daemon=True).start()
-    print(f'Bitcoin Hero Northflank Tracker v11 on 0.0.0.0:{PORT}; DB={DB}')
+    os.chdir(os.path.dirname(os.path.abspath(__file__))); init_db(); bootstrap_candles(); threading.Thread(target=collector,daemon=True).start()
+    print(f'Bitcoin Hero Northflank Tracker v18 on 0.0.0.0:{PORT}; DB={DB}')
     ThreadingHTTPServer((HOST,PORT),Handler).serve_forever()
