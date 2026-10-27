@@ -1,16 +1,13 @@
-BITCOIN HERO TRACKER v19 — NORTHFLANK EDITION
+BITCOIN HERO TRACKER v21 — NORTHFLANK EDITION
 ==============================================
 
 Features retained / included
 - 24/7 server-side Bitcoin Hero simulated-price collector (~3 seconds)
 - Persistent SQLite history and hourly OHLC candles
 - Branded username/password login with HttpOnly session cookies protecting dashboard APIs
-- Candlestick charts with Open, High, Low, Close (OHLC) hover details
-- LIVE (last 5 minutes), 1H (1-minute candles), 4H (5-minute candles), 1D (15-minute candles), ALL (saved hourly candles)
-- Live 1-minute and current hourly candles update from normal 3-second price polls
-- Hourly candles are stored in SQLite and survive restarts/redeployments when the existing /data volume is retained
-- On first startup, existing raw price history is converted into hourly candles without deleting existing price records
-- Recent minute candles are restored from existing raw observations at startup
+- Graph-free dashboard: all eight coin cards are visible together, with no chart controls or graphs
+- Current prices, percentage changes, protected observed highs/lows, range bar, and potential range are shown for every coin
+- Existing historical price and candle data remain in the database; graphs are not displayed in this version
 - Observed highs/lows and timestamps remain independently protected and update on each poll
 - Potential UP/DOWN percentage range calculations
 - Cryptocurrency logos in place of gain-potential rings
@@ -47,7 +44,7 @@ IMPORTING OLD DATA
 
 EXISTING DEPLOYMENTS — IMPORTANT
 - Keep the existing /data persistent volume mounted. Do not delete or replace it during deployment.
-- The first v19 startup adds candle tables and backfills hourly candles from existing raw prices. It does not delete existing raw prices, observed extrema, or events.
+- This v21 package is based on v20 and keeps the existing SQLite schema and collection logic. It does not delete existing raw prices, observed extrema, or events.
 - Existing extrema are not overwritten by BASE defaults when a database already exists.
 - The first candle backfill can take a little time if the database contains a long raw-price history.
 
